@@ -1,0 +1,117 @@
+# Member eligibility: MEMBER-REC (fixed-width EBCDIC) -> member JSON document.
+# Uses every scenario WitnessForge supports, one or more per rule.
+name: member-eligibility
+key: E01                                   # unique per witness; verify matches documents by it
+filter: {field: REC-TYPE, equals: D}       # only detail records are loaded
+
+rules:
+  - id: E01                                # required + format + unique across records
+    source: MEMBER-ID
+    target: memberId
+    steps: [strip]
+    checks: [required, {pattern: '^M[0-9]{9}$'}, unique]
+
+  - id: E02                                # concatenation of two fields
+    source: [FIRST-NAME, LAST-NAME]
+    separator: " "
+    target: name.full
+    steps: [upper]
+
+  - id: E03                                # code lookup + allowed values
+    source: GENDER
+    target: gender
+    steps:
+      - map: {values: {M: male, F: female, U: unknown}, default: invalid}
+    checks: [{allowed: [male, female, unknown]}]
+
+  - id: E04                                # date conversion, sentinel null, required, reject bad dates
+    source: BIRTH-DATE
+    target: birthDate
+    steps:
+      - date: {in: "%Y%m%d", out: "%Y-%m-%d", nulls: ["00000000"]}
+    checks: [required]
+    on_error: reject
+
+  - id: E05                                # substring + pattern
+    source: ZIP-CODE
+    target: address.zip5
+    steps: [{substring: {start: 1, length: 5}}]
+    checks: [{pattern: '^[0-9]{5}$'}]
+
+  - id: E06                                # regex reformatting
+    source: PHONE
+    target: contact.phone
+    steps:
+      - strip
+      - replace: {pattern: '^([0-9]{3})([0-9]{3})([0-9]{4})$', with: '(\1) \2-\3'}
+      - null_if_blank
+
+  - id: E07                                # leading-zero removal
+    source: ACCOUNT-NO
+    target: account.number
+    steps: [strip, lstrip_zeros, null_if_blank]
+
+  - id: E08                                # padding
+    source: PLAN-CODE
+    target: plan.code
+    steps: [strip, {pad: {length: 6, char: "0", side: left}}]
+    checks: [{max_length: 7}]               # codes longer than 7 are rejected
+
+  - id: E09                                # Y/N to boolean
+    source: ACTIVE-FLAG
+    target: active
+    steps:
+      - boolean: {true: [Y], false: [N]}
+
+  - id: E10                                # binary COMP, cents to dollars, numeric range
+    source: PREMIUM-CENTS
+    target: premium.monthly
+    steps: [{divide: 100}, number]
+    checks: [{min: 0}, {max: 5000}]
+
+  - id: E11                                # packed decimal, rounding, minimum
+    source: COPAY-AMT
+    target: premium.copay
+    steps: [{round: 1}, number]
+    checks: [{min: 0}]
+
+  - id: E12                                # zoned decimal with 4 implied decimals, rounding
+    source: RISK-SCORE
+    target: risk.score
+    steps: [{round: 2}, number]
+    checks: [{max: 900}]
+
+  - id: E13                                # integer range
+    source: HOUSEHOLD-SIZE
+    target: household.size
+    steps: [number]
+    checks: [{min: 1}, {max: 12}]
+
+  - id: E14                                # conditional mapping
+    source: TERM-DATE
+    target: coverage.termDate
+    when: {field: ACTIVE-FLAG, equals: N}
+    else: null
+    steps:
+      - date: {in: "%Y%m%d", out: "%Y-%m-%d"}
+    on_error: reject
+
+  - id: E15                                # array: blanks removed, duplicates removed, item limits
+    source: PROGRAM-CODE
+    target: programs
+    steps: [strip, upper]
+    drop_blank: true
+    distinct: true
+    checks: [required, {max_items: 3}, {allowed: [CHP, MED, LTC, DSN, WAV]}]
+
+  - id: E16                                # array of objects from parallel OCCURS fields
+    target: diagnoses
+    items:
+      code: {source: DIAG-CODE, steps: [strip, upper]}
+      qualifier: {source: DIAG-QUAL, steps: [strip], checks: [{allowed: [AB, ABF, ABK, BK, BF]}]}
+    drop_blank: true
+    checks: [unique_items]
+
+  - id: E17                                # constant
+    value: MMIS
+    target: sourceSystem

@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "witnessforge"
+version = "0.1.0"
+description = "Mutation-guided minimal witness data for validating ETL mapping rules on mainframe (COBOL copybook) sources."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Srikanth Kavuri", email = "srikanth1539@gmail.com" }]
+keywords = ["etl", "testing", "mutation-testing", "cobol", "copybook", "data-quality", "test-data", "ebcdic"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Database",
+]
+dependencies = ["PyYAML>=6.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://github.com/skavuri143/witnessforge"
+Issues = "https://github.com/skavuri143/witnessforge/issues"
+
+[project.scripts]
+witnessforge = "witnessforge.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "WitnessForge: Mutation-Guided Minimal Witness Data for ETL Mapping Validation"
+authors:
+  - family-names: Kavuri
+    given-names: Srikanth
+version: 0.1.0
+date-released: 2026-11-01
+license: Apache-2.0
+repository-code: "https://github.com/skavuri143/witnessforge"
+keywords:
+  - ETL testing
+  - mutation testing
+  - test data generation
+  - COBOL copybook
+  - data quality

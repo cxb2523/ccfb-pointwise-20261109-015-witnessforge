@@ -1,0 +1,48 @@
+# Mapping specification: CLAIM-REC (fixed-width EBCDIC) -> claim JSON document
+name: claim-header
+key: R1          # witness records get unique claim IDs; verify matches output by claimId
+rules:
+  - id: R1
+    source: CLAIM-ID
+    target: claimId
+    steps: [strip]
+
+  - id: R2
+    source: MEMBER-ID
+    target: member.id
+    steps: [strip, null_if_blank]
+
+  - id: R3
+    source: CLAIM-TYPE
+    target: claimType
+    steps:
+      - map:
+          values: {IP: inpatient, OP: outpatient, RX: pharmacy}
+          default: unknown
+
+  - id: R4
+    source: SERVICE-DATE
+    target: service.date
+    steps:
+      - date: {in: "%Y%m%d", out: "%Y-%m-%d"}
+
+  - id: R5
+    source: BILLED-AMT
+    target: amounts.billed
+    steps: [number]
+
+  - id: R6
+    source: UNITS
+    target: amounts.units
+    steps: [number]
+
+  - id: R7
+    source: DIAG-CODE
+    target: diagnoses
+    steps: [strip, upper]
+    drop_blank: true
+
+  - id: R8
+    source: PROVIDER-NAME
+    target: provider.name
+    steps: [strip, upper]
