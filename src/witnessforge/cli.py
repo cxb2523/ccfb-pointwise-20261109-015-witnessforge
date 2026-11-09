@@ -9,21 +9,30 @@ from pathlib import Path
 from typing import List, Optional
 
 from . import __version__
-from .codec import CodecError
+from .codec import CodecError, encode_record
 from .copybook import CopybookError, load_copybook
-from .mapping import MappingError, load_mapping
+from .mapping import MappingError, apply_mapping, get_path, load_mapping, rebuild_source_record
 from .mutants import generate_mutants
 from .pipeline import json_ready
 from .report import build_report, to_markdown
 from .verify import verify
-from .witness import forge
+from .witness import build_pool, forge
 
 EXIT_OK, EXIT_FAIL, EXIT_INPUT = 0, 1, 2
 
 
+def _resolve(positional: Optional[str], option: Optional[str], label: str) -> str:
+    value = option or positional
+    if not value:
+        raise SystemExit(f"error: {label} is required (positional or --{label})")
+    return value
+
+
 def _load(args):
-    layout = load_copybook(args.copybook)
-    return layout, load_mapping(args.mapping, layout)
+    copybook_path = _resolve(args.copybook, getattr(args, "copybook_opt", None), "copybook")
+    mapping_path = _resolve(args.mapping, getattr(args, "mapping_opt", None), "mapping")
+    layout = load_copybook(copybook_path)
+    return layout, load_mapping(mapping_path, layout)
 
 
 def _write_jsonl(path: Path, rows) -> None:
@@ -75,8 +84,48 @@ def cmd_mutants(args) -> int:
     return EXIT_OK
 
 
+def cmd_verify_roundtrip(layout, mapping) -> int:
+    """Self-contained check (no external pipeline output needed): for a pool of
+    copybook-conformant witness records, decode -> map -> rebuild -> encode must
+    reproduce the original bytes exactly, unless a cobol_date field is explicitly
+    rewritten in the mapped document (which this check never does, so every
+    cobol_date field -- including ones skipped or defaulted on invalid digits --
+    is expected to round-trip untouched)."""
+    pool = build_pool(layout, mapping)
+    key = mapping.key_rule.target if mapping.key_rule else None
+    failures = 0
+    for index, candidate in enumerate(pool):
+        record = candidate.record
+        doc = apply_mapping(record, mapping, layout)
+        rebuilt = rebuild_source_record(record, doc, mapping, layout)
+        try:
+            data2 = encode_record(layout, rebuilt)
+        except CodecError as exc:
+            print(f"ROUNDTRIP FAIL record {index}: re-encode raised {exc}")
+            failures += 1
+            continue
+        if data2 != candidate.data:
+            print(f"ROUNDTRIP FAIL record {index}: decode->encode changed the bytes")
+            failures += 1
+            continue
+        tag = f" {key}={get_path(doc, key)!r}" if key else ""
+        print(
+            f"ROUNDTRIP PASS record {index}{tag}: {len(candidate.data)} bytes, "
+            f"decode->encode reproduced the original copybook record exactly."
+        )
+    ok = failures == 0
+    print(f"{'PASS' if ok else 'FAIL'}: {len(pool)} witness records round-tripped "
+          f"({len(pool) - failures} ok, {failures} failed).")
+    return EXIT_OK if ok else EXIT_FAIL
+
+
 def cmd_verify(args) -> int:
     layout, mapping = _load(args)
+    if not args.input and not args.actual:
+        return cmd_verify_roundtrip(layout, mapping)
+    if not args.input or not args.actual:
+        print("error: --input and --actual must be given together", file=sys.stderr)
+        return EXIT_INPUT
     data = Path(args.input).read_bytes()
     actual = [
         json.loads(line)
@@ -119,8 +168,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     def common(p):
-        p.add_argument("copybook", help="COBOL copybook (.cpy) describing the source record")
-        p.add_argument("mapping", help="mapping specification (.yaml)")
+        p.add_argument("copybook", nargs="?",
+                        help="COBOL copybook (.cpy) describing the source record")
+        p.add_argument("mapping", nargs="?", help="mapping specification (.yaml)")
+        p.add_argument("--copybook", dest="copybook_opt", metavar="PATH",
+                        help="same as the positional copybook argument")
+        p.add_argument("--mapping", dest="mapping_opt", metavar="PATH",
+                        help="same as the positional mapping argument")
 
     gen = sub.add_parser("generate", help="build the witness dataset and coverage report")
     common(gen)
@@ -135,8 +189,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     ver = sub.add_parser("verify", help="check your pipeline's output for the witness records")
     common(ver)
-    ver.add_argument("--input", required=True, help="witnesses.dat that was fed to the pipeline")
-    ver.add_argument("--actual", required=True, help="pipeline output, one JSON document per line")
+    ver.add_argument("--input", help="witnesses.dat that was fed to the pipeline "
+                     "(omit together with --actual to run a self-contained decode/encode "
+                     "round-trip check instead)")
+    ver.add_argument("--actual", help="pipeline output, one JSON document per line")
     ver.add_argument("--key", help="dotted path used to match documents "
                      "(default: the mapping's key rule; otherwise by position)")
     ver.add_argument("--rejects", help="the pipeline's reject file, one JSON document per line, "

@@ -34,6 +34,22 @@ def _digit_string(field: Field, value: Any) -> str:
     return digits.zfill(field.total_digits)
 
 
+def digits_of(field: Field, value: Any) -> str:
+    """Zero-padded decimal digits for an unsigned, unscaled PIC 9 / COMP field.
+
+    Used by mapping steps (such as COBOL date fields) that need the exact source
+    digit width and padding rather than the numeric ``Decimal`` value, since a
+    leading zero (e.g. year ``05``) is otherwise lost once the field is read as a
+    plain integer.
+    """
+    if field.kind not in ("9", "B") or field.scale or field.signed:
+        raise CodecError(f"{field.name}: digits_of needs an unsigned integer PIC 9 or COMP field")
+    digits = str(int(Decimal(value))).zfill(field.int_digits)
+    if len(digits) > field.int_digits:
+        raise CodecError(f"{field.name}: {value} does not fit {field.int_digits} digits")
+    return digits
+
+
 def encode_item(field: Field, value: Any) -> bytes:
     """Encode one occurrence of a field."""
     if field.kind == "X":

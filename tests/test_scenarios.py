@@ -42,9 +42,16 @@ def test_full_coverage(result):
     assert outcomes == {"loaded", "rejected", "filtered"}
 
 
+_COBOL_DATE_OPERATORS = {op for op in OPERATORS if op.startswith("cobol_date")}
+
+
 def test_every_operator_is_exercised(result):
+    # cobol_date operators have no field in the eligibility example; they are
+    # checked separately against examples/claims/mapping_dates.yaml (see
+    # tests/test_cobol_date.py::test_cobol_date_operators_are_exercised).
     used = {m.operator for m in result.mutants}
-    assert set(OPERATORS) <= used, set(OPERATORS) - used
+    wanted = set(OPERATORS) - _COBOL_DATE_OPERATORS
+    assert wanted <= used, wanted - used
 
 
 def test_loaded_keys_are_unique(result):

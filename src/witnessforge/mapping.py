@@ -37,20 +37,23 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
+from .codec import digits_of
 from .copybook import Field, Layout
 
 PUBLIC_STEPS = {
     "strip", "rstrip", "lstrip", "upper", "lower", "number", "null_if_blank", "date", "map",
     "default", "substring", "lstrip_zeros", "pad", "boolean", "multiply", "divide", "round",
-    "replace",
+    "replace", "cobol_date",
 }
+_COBOL_DATE_TOKEN = re.compile(r"%[yYmd]")
+_COBOL_DATE_WIDTHS = {"y": 2, "Y": 4, "m": 2, "d": 2}
 CHECKS = {
     "required", "min_length", "max_length", "min", "max", "pattern", "allowed",
     "min_items", "max_items", "unique_items", "unique",
@@ -161,6 +164,26 @@ def _one_key(rule_id: str, raw: Any, what: str) -> Tuple[str, Any]:
     raise MappingError(f"{rule_id}: each {what} must be a name or a one-key mapping, got {raw!r}")
 
 
+def _parse_cobol_date_format(rule_id: str, fmt: str) -> List[Tuple[str, int]]:
+    """Split a digits-only COBOL date format (e.g. ``%y%m%d``) into ordered
+    ``(token, width)`` pairs. Exactly one year token (%y or %Y) plus %m and %d
+    are required, and no literal separators are allowed: the source bytes are
+    packed digits with no punctuation."""
+    tokens = _COBOL_DATE_TOKEN.findall(fmt)
+    if _COBOL_DATE_TOKEN.sub("", fmt):
+        raise MappingError(
+            f"{rule_id}: cobol_date input_format must contain only %y/%Y/%m/%d with no separators"
+        )
+    kinds = [t[1] for t in tokens]
+    year_kinds = [k for k in kinds if k in ("y", "Y")]
+    if len(kinds) != 3 or len(year_kinds) != 1 or kinds.count("m") != 1 or kinds.count("d") != 1:
+        raise MappingError(
+            f"{rule_id}: cobol_date input_format needs exactly one year token (%y or %Y) "
+            f"plus %m and %d, got {fmt!r}"
+        )
+    return [(k, _COBOL_DATE_WIDTHS[k]) for k in kinds]
+
+
 def _normalize_step(rule_id: str, raw: Any) -> Step:
     op, arg = _one_key(rule_id, raw, "step")
     if op not in PUBLIC_STEPS:
@@ -210,6 +233,26 @@ def _normalize_step(rule_id: str, raw: Any) -> Step:
             raise MappingError(f"{rule_id}: replace needs 'pattern' (and 'with')")
         _compile(rule_id, arg["pattern"])
         arg = {"pattern": arg["pattern"], "with": str(arg.get("with", ""))}
+    elif op == "cobol_date":
+        if not (isinstance(arg, dict) and arg.get("input_format") and arg.get("output_format")):
+            raise MappingError(f"{rule_id}: cobol_date needs 'input_format' and 'output_format'")
+        tokens = _parse_cobol_date_format(rule_id, str(arg["input_format"]))
+        on_error = str(arg.get("on_error", "raise"))
+        if on_error not in ("raise", "skip", "default"):
+            raise MappingError(f"{rule_id}: cobol_date on_error must be raise, skip or default")
+        if on_error == "default" and "default" not in arg:
+            raise MappingError(f"{rule_id}: cobol_date on_error: default needs a 'default' value")
+        pivot = arg.get("pivot", 50)
+        if not isinstance(pivot, int) or isinstance(pivot, bool) or not (0 <= pivot <= 99):
+            raise MappingError(f"{rule_id}: cobol_date pivot must be an integer between 0 and 99")
+        arg = {
+            "input_format": str(arg["input_format"]),
+            "output_format": str(arg["output_format"]),
+            "pivot": pivot,
+            "on_error": on_error,
+            "default": arg.get("default"),
+            "_tokens": tuple(tokens),
+        }
     return op, arg
 
 
@@ -353,6 +396,27 @@ def mapping_from_dict(data: Dict[str, Any], layout: Optional[Layout] = None) -> 
             if bad or raw.get("distinct"):
                 raise MappingError(f"{rule_id}: {bad or 'distinct'} only applies to array rules")
 
+        steps_parsed = tuple(_normalize_step(rule_id, s) for s in steps)
+        cobol_date_args = [a for o, a in steps_parsed if o == "cobol_date"]
+        if cobol_date_args:
+            if items or len(sources) != 1:
+                raise MappingError(f"{rule_id}: cobol_date needs exactly one source field")
+            if layout is not None:
+                field = layout.field(sources[0])
+                if field.occurs > 1:
+                    raise MappingError(f"{rule_id}: cobol_date cannot be used on an OCCURS field")
+                if field.kind not in ("9", "B") or field.scale or field.signed:
+                    raise MappingError(
+                        f"{rule_id}: cobol_date requires an unsigned integer PIC 9 or COMP field, "
+                        f"{sources[0]} is {field.describe()}"
+                    )
+                width = sum(w for _, w in cobol_date_args[0]["_tokens"])
+                if field.int_digits != width:
+                    raise MappingError(
+                        f"{rule_id}: cobol_date input_format needs {width} digits, "
+                        f"{sources[0]} has {field.int_digits}"
+                    )
+
         ids.add(rule_id)
         targets.add(target)
         rules.append(
@@ -360,7 +424,7 @@ def mapping_from_dict(data: Dict[str, Any], layout: Optional[Layout] = None) -> 
                 id=rule_id,
                 target=target,
                 sources=sources,
-                steps=tuple(_normalize_step(rule_id, s) for s in steps),
+                steps=steps_parsed,
                 checks=checks_parsed,
                 drop_blank=bool(raw.get("drop_blank", False)),
                 distinct=bool(raw.get("distinct", False)),
@@ -460,6 +524,66 @@ def _arith(value: Any, fn) -> Any:
     return result
 
 
+def _cobol_full_year(parts: Dict[str, int], pivot: int) -> int:
+    """Century inference for a 2-digit year: ``yy >= pivot`` falls in 19xx, else 20xx."""
+    if "y" in parts:
+        yy = parts["y"]
+        return (1900 if yy >= pivot else 2000) + yy
+    return parts["Y"]
+
+
+def _cobol_date_decode(value: Any, arg: Dict[str, Any], field: Optional[Field]) -> Optional[str]:
+    """Decode a raw COBOL date field (binary YYYYMMDD or zoned YYMMDD) into ``output_format``.
+
+    ``on_error`` governs out-of-range month/day digits (e.g. 20231332) one field at a
+    time, so a single dirty record never has to crash the whole batch: ``raise`` lets
+    the failure propagate to the rule's own ``on_error`` (fail/reject), ``skip`` leaves
+    the target null, ``default`` substitutes a fixed value.
+    """
+    tokens = arg["_tokens"]
+    width = sum(w for _, w in tokens)
+    try:
+        if value is None:
+            raise ValueError("missing COBOL date value")
+        digits = digits_of(field, value) if field is not None else str(int(value)).zfill(width)
+        if len(digits) != width:
+            raise ValueError(f"{value!r} does not fit a {width}-digit COBOL date")
+        parts: Dict[str, int] = {}
+        pos = 0
+        for key, token_width in tokens:
+            parts[key] = int(digits[pos : pos + token_width])
+            pos += token_width
+        year = _cobol_full_year(parts, arg["pivot"])
+        when = date(year, parts["m"], parts["d"])
+    except (ValueError, OverflowError) as exc:
+        if arg["on_error"] == "skip":
+            return None
+        if arg["on_error"] == "default":
+            return arg["default"]
+        raise MappingError(f"invalid COBOL date {value!r}: {exc}") from exc
+    return when.strftime(arg["output_format"])
+
+
+def cobol_date_to_raw(text: Any, arg: Dict[str, Any]) -> Decimal:
+    """Reverse of :func:`_cobol_date_decode`: parse a value already in ``output_format``
+    back into the raw digits the copybook field holds (as the scale-0 ``Decimal`` that
+    :func:`witnessforge.codec.encode_item` expects). A 4-digit year is truncated back to
+    its 2-digit source form when ``input_format`` uses ``%y`` -- this is always exact,
+    since the century that :func:`_cobol_date_decode` inferred is discarded on the way in."""
+    when = datetime.strptime(str(text), arg["output_format"]).date()
+    digits = []
+    for key, _ in arg["_tokens"]:
+        if key == "y":
+            digits.append(str(when.year % 100).zfill(2))
+        elif key == "Y":
+            digits.append(str(when.year).zfill(4))
+        elif key == "m":
+            digits.append(str(when.month).zfill(2))
+        else:
+            digits.append(str(when.day).zfill(2))
+    return Decimal(int("".join(digits)))
+
+
 def apply_step(value: Any, op: str, arg: Any, field: Optional[Field]) -> Any:
     if op in ("strip", "rstrip", "lstrip", "upper", "lower"):
         return getattr(value, op)() if isinstance(value, str) else value
@@ -512,6 +636,8 @@ def apply_step(value: Any, op: str, arg: Any, field: Optional[Field]) -> Any:
         return _arith(value, lambda d: d.quantize(Decimal(1).scaleb(-arg), rounding=ROUND_HALF_UP))
     if op == "replace":
         return None if value is None else re.sub(arg["pattern"], arg["with"], str(value))
+    if op == "cobol_date":
+        return _cobol_date_decode(value, arg, field)
     if op == "_truncate":
         return value[:arg] if isinstance(value, str) else value
     if op == "_abs":
@@ -739,3 +865,41 @@ def apply_mapping(record: Dict[str, Any], mapping: Mapping, layout: Layout) -> D
         return assemble(mapping, outcomes, True)
     outcomes = {rule.id: rule_outcome(record, rule, layout) for rule in mapping.rules}
     return assemble(mapping, outcomes, False)
+
+
+_NO_VALUE = object()
+
+
+def rebuild_source_record(
+    record: Dict[str, Any], doc: Dict[str, Any], mapping: Mapping, layout: Layout
+) -> Dict[str, Any]:
+    """Reconstruct a record dict suitable for ``codec.encode_record`` from a decoded
+    source record and its mapped output document.
+
+    Every field driven by a ``cobol_date`` step keeps its original decoded value --
+    and therefore its original copybook bytes, width and padding -- unless the caller
+    explicitly rewrote that field's target path in ``doc`` to something other than what
+    the forward mapping already produced for it. This holds regardless of which
+    ``on_error`` strategy fired: a value that was left null by ``skip``, or replaced by
+    ``default``, is still "unchanged" as far as round-tripping is concerned, so its
+    original (possibly out-of-range) digits are preserved byte for byte instead of
+    being re-derived from a placeholder. Only a genuine rewrite -- a date the caller
+    actually changed -- is re-encoded, with the configured pivot collapsing a 4-digit
+    year back to its 2-digit source width.
+    """
+    updated = dict(record)
+    for rule in mapping.rules:
+        if rule.source is None:
+            continue
+        arg = next((a for o, a in rule.steps if o == "cobol_date"), None)
+        if arg is None:
+            continue
+        try:
+            accepted, forward_value, _ = rule_outcome(record, rule, layout)
+        except Exception:
+            continue  # the record is unusable upstream; leave the raw bytes untouched
+        current = get_path(doc, rule.target, _NO_VALUE)
+        if not accepted or current is _NO_VALUE or current == forward_value:
+            continue
+        updated[rule.source] = cobol_date_to_raw(current, arg)
+    return updated

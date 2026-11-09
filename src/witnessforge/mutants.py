@@ -39,6 +39,9 @@ OPERATORS = {
     "case_flip": "upper and lower swapped",
     "date_swap": "Day and month swapped in the input date format",
     "date_nulls_ignored": "Sentinel dates such as 00000000 are not turned into null",
+    "cobol_date_swap": "Day and month digits swapped in a COBOL date field",
+    "cobol_date_pivot_shift": "Century pivot for a 2-digit COBOL year shifted by 50",
+    "cobol_date_error_swallowed": "Invalid COBOL dates loaded as null instead of raised",
     "map_default": "Every code falls through to the lookup default",
     "substring_shift": "Substring starts one position early or late",
     "substring_short": "Substring one character too short",
@@ -78,6 +81,15 @@ def _swap_day_month(fmt: str) -> Optional[str]:
     if "%d" not in fmt or "%m" not in fmt:
         return None
     return fmt.replace("%d", "\0").replace("%m", "%d").replace("\0", "%m")
+
+
+def _swap_cobol_tokens(tokens):
+    positions = {k: i for i, (k, _) in enumerate(tokens)}
+    if "m" not in positions or "d" not in positions:
+        return None
+    swapped = list(tokens)
+    swapped[positions["m"]], swapped[positions["d"]] = swapped[positions["d"]], swapped[positions["m"]]
+    return tuple(swapped)
 
 
 def _nearest_same_type(layout: Layout, field: Field) -> Optional[Field]:
@@ -134,6 +146,17 @@ def _step_changes(rule: Rule) -> Iterator[Change]:
             yield "arith_swap", f"{op} {arg} became {other} {arg}", _with_step(rule, i, (other, arg)), None
         elif op == "round" and arg > 0:
             yield "round_places", f"rounded to {arg - 1} places", _with_step(rule, i, ("round", arg - 1)), None
+        elif op == "cobol_date":
+            swapped_tokens = _swap_cobol_tokens(arg["_tokens"])
+            if swapped_tokens:
+                yield "cobol_date_swap", "day and month digits swapped", _with_step(
+                    rule, i, ("cobol_date", dict(arg, _tokens=swapped_tokens))), None
+            if any(k == "y" for k, _ in arg["_tokens"]):
+                yield "cobol_date_pivot_shift", f"pivot {arg['pivot']} shifted to {(arg['pivot'] + 50) % 100}", \
+                    _with_step(rule, i, ("cobol_date", dict(arg, pivot=(arg["pivot"] + 50) % 100))), None
+            if arg["on_error"] == "raise":
+                yield "cobol_date_error_swallowed", "on_error raise replaced by skip", _with_step(
+                    rule, i, ("cobol_date", dict(arg, on_error="skip"))), None
     ops = [op for op, _ in steps]
     required = any(op == "required" for op, _ in rule.checks)
     if ("null_if_blank" in ops or "date" in ops) and not required:  # "" and null both fail required

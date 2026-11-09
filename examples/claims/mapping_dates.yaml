@@ -1,0 +1,59 @@
+# Mapping specification: CLAIM-DATE-REC (fixed-width EBCDIC) -> claim JSON document
+#
+# Exercises the three cobol_date on_error strategies and the configurable century
+# pivot for 2-digit COBOL years:
+#   R3  ADMIT-DATE-BIN   PIC 9(8) COMP  (binary YYYYMMDD, 4-digit year, no pivot needed)
+#       on_error: raise  + rule on_error: reject -> one dirty record is rejected,
+#       the rest of the batch is unaffected.
+#   R4  DOB-ZONED        PIC 9(6)       (zoned YYMMDD, 2-digit year, pivot 50)
+#       on_error: skip   -> an invalid date is silently dropped to null, record still loads.
+#   R5  DISCHARGE-ZONED  PIC 9(6)       (zoned YYMMDD, 2-digit year, pivot 30)
+#       on_error: default -> an invalid date falls back to a fixed placeholder.
+name: claim-dates
+key: R1
+rules:
+  - id: R1
+    source: CLAIM-ID
+    target: claimId
+    steps: [strip]
+
+  - id: R2
+    source: MEMBER-ID
+    target: member.id
+    steps: [strip, null_if_blank]
+
+  - id: R3
+    source: ADMIT-DATE-BIN
+    target: admission.date
+    on_error: reject
+    steps:
+      - cobol_date:
+          input_format: "%Y%m%d"
+          output_format: "%Y-%m-%d"
+          on_error: raise
+
+  - id: R4
+    source: DOB-ZONED
+    target: member.birthDate
+    steps:
+      - cobol_date:
+          input_format: "%y%m%d"
+          output_format: "%Y-%m-%d"
+          pivot: 50
+          on_error: skip
+
+  - id: R5
+    source: DISCHARGE-ZONED
+    target: discharge.date
+    steps:
+      - cobol_date:
+          input_format: "%y%m%d"
+          output_format: "%Y-%m-%d"
+          pivot: 30
+          on_error: default
+          default: "1900-01-01"
+
+  - id: R6
+    source: PROVIDER-NAME
+    target: provider.name
+    steps: [strip, upper]

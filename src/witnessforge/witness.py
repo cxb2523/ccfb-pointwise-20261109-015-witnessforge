@@ -170,6 +170,32 @@ def _text_specials(size: int, usage: FieldUsage, seed: int, variant: int) -> Lis
     return out
 
 
+def _cobol_date_specials(arg: Dict[str, Any]) -> List[Decimal]:
+    """Digit patterns that exercise the century pivot (both sides of the boundary)
+    and an out-of-range month/day (e.g. 20231332-style) for a COBOL date field."""
+    tokens = arg["_tokens"]
+    width = sum(w for _, w in tokens)
+    has_yy = any(k == "y" for k, _ in tokens)
+
+    def build(**parts: str) -> Decimal:
+        digits = "".join(parts[k] for k, _ in tokens)
+        return Decimal(int(digits.zfill(width)))
+
+    out: List[Decimal] = []
+    if has_yy:
+        pivot = arg["pivot"]
+        below = f"{max(pivot - 1, 0):02d}"  # falls in 20xx
+        at_or_above = f"{pivot:02d}"  # falls in 19xx
+        out.append(build(y=below, m="01", d="15"))
+        out.append(build(y=at_or_above, m="06", d="20"))
+        out.append(build(y=at_or_above, m="13", d="32"))  # invalid month and day
+    else:
+        out.append(build(Y="2024", m="01", d="31"))
+        out.append(build(Y="1999", m="12", d="09"))
+        out.append(build(Y="2031", m="13", d="32"))  # invalid month and day
+    return out
+
+
 def _numeric_specials(field: Field, usage: FieldUsage, quantum: Decimal) -> List[Decimal]:
     out: List[Decimal] = []
     for rule in usage.rules:
@@ -188,6 +214,8 @@ def _numeric_specials(field: Field, usage: FieldUsage, quantum: Decimal) -> List
             if op in ("map", "boolean"):
                 keys = list(arg["values"]) if op == "map" else arg["true"] + arg["false"]
                 out += [Decimal(k) for k in keys if _is_number(k)]
+            elif op == "cobol_date":
+                out += _cobol_date_specials(arg)
     for condition in usage.conditions:
         out += [Decimal(str(v)) for v in condition.values if _is_number(v)]
     return out
